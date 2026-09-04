@@ -7,6 +7,7 @@ import {
   CalendarDays, Filter, Info, Sparkles, PackagePlus, History, Wallet, ChevronDown,
   ImagePlus, ImageOff, FileText, Download, ArrowDownCircle, ArrowUpCircle,
   Lock, ShieldCheck, Landmark, UserCog, LockOpen, Repeat, ClipboardList, Undo2, HandCoins,
+  Settings, ShieldAlert,
 } from "lucide-react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line,
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { id: "comissoes", label: "Comissões", icon: Percent },
   { id: "financeiro", label: "Financeiro", icon: Landmark, adminOnly: true },
   { id: "relatorios", label: "Relatórios", icon: FileText, adminOnly: true },
+  { id: "configuracoes", label: "Configurações", icon: Settings, adminOnly: true },
 ];
 
 const FINANCE_CATEGORIES = {
@@ -698,6 +700,7 @@ export default function FabiCosmeticosApp() {
         {section === "comissoes" && <Comissoes db={db} role={role} updateDb={updateDb} pushToast={pushToast} />}
         {section === "financeiro" && isAdmin && <Financeiro db={db} updateDb={updateDb} pushToast={pushToast} askConfirm={askConfirm} />}
         {section === "relatorios" && isAdmin && <Relatorios db={db} />}
+        {section === "configuracoes" && isAdmin && <Configuracoes db={db} updateDb={updateDb} pushToast={pushToast} changeRole={changeRole} />}
       </main>
     </div>
   );
@@ -3508,6 +3511,101 @@ function Consignacao({ db, updateDb, pushToast, askConfirm }) {
   );
 }
 
+/* ============================== CONFIGURAÇÕES ============================== */
+
+function Configuracoes({ db, updateDb, pushToast, changeRole }) {
+  const [settingsForm, setSettingsForm] = useState({ ...db.settings });
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const [resetting, setResetting] = useState(false);
+
+  const saveSettings = () => {
+    updateDb((prev) => ({ ...prev, settings: { ...prev.settings, ...settingsForm } }));
+    pushToast("Dados da loja atualizados.");
+  };
+
+  const canConfirmReset = confirmText.trim().toUpperCase() === "RESETAR";
+
+  const closeResetModal = () => { setResetModalOpen(false); setConfirmText(""); };
+
+  const executeReset = () => {
+    if (!canConfirmReset || resetting) return;
+    setResetting(true);
+    try {
+      updateDb((prev) => ({
+        products: [], categories: [...DEFAULT_CATEGORIES], customers: [], sellers: [], sales: [],
+        stockMovements: [], financeTransactions: [], cashRegisters: [], installmentSales: [],
+        consignments: [], settlements: [], settings: prev.settings,
+      }));
+      changeRole({ type: "admin" });
+      setResetModalOpen(false);
+      setConfirmText("");
+      pushToast("✅ Sistema resetado com sucesso! Pronto para um novo cadastro.");
+    } catch (e) {
+      pushToast("❌ Não foi possível concluir o reset. Nenhum dado foi apagado.", "error");
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div><p className="page-eyebrow">Sistema</p><h1 className="page-title">Configurações</h1></div>
+      </div>
+
+      <div className="card">
+        <div className="card-header"><h3>Dados da loja</h3></div>
+        <div className="form-grid">
+          <Field label="Nome da loja" span><input value={settingsForm.companyName} onChange={(e) => setSettingsForm((f) => ({ ...f, companyName: e.target.value }))} /></Field>
+          <Field label="Telefone"><input value={settingsForm.phone} onChange={(e) => setSettingsForm((f) => ({ ...f, phone: e.target.value }))} /></Field>
+          <Field label="WhatsApp"><input value={settingsForm.whatsapp} onChange={(e) => setSettingsForm((f) => ({ ...f, whatsapp: e.target.value }))} /></Field>
+          <Field label="Instagram"><input value={settingsForm.instagram} onChange={(e) => setSettingsForm((f) => ({ ...f, instagram: e.target.value }))} /></Field>
+          <Field label="CNPJ"><input value={settingsForm.cnpj} onChange={(e) => setSettingsForm((f) => ({ ...f, cnpj: e.target.value }))} /></Field>
+          <Field label="Endereço" span><input value={settingsForm.address} onChange={(e) => setSettingsForm((f) => ({ ...f, address: e.target.value }))} /></Field>
+          <Field label="Mensagem do comprovante" span><input value={settingsForm.receiptMessage} onChange={(e) => setSettingsForm((f) => ({ ...f, receiptMessage: e.target.value }))} /></Field>
+          <Field label="Estoque mínimo padrão"><input type="number" min="0" value={settingsForm.defaultMinStock} onChange={(e) => setSettingsForm((f) => ({ ...f, defaultMinStock: Number(e.target.value) || 0 }))} /></Field>
+        </div>
+        <button className="btn-gold" onClick={saveSettings}>Salvar alterações</button>
+      </div>
+
+      <div className="card danger-zone">
+        <div className="card-header"><h3><ShieldAlert size={18} style={{ marginRight: 6, verticalAlign: "-3px" }} /> Resetar dados do sistema</h3></div>
+        <p className="danger-zone-text">
+          Use esta função para limpar dados de teste ou preparar o sistema para um novo usuário. Ela apaga permanentemente
+          todos os clientes, vendedoras, produtos, estoque, vendas, comissões, pagamentos a prazo e acertos de consignação
+          cadastrados — mas não afeta a estrutura do sistema, que continuará funcionando normalmente.
+        </p>
+        <button className="btn-danger-solid" onClick={() => setResetModalOpen(true)}><Trash2 size={16} /> Resetar todas as informações</button>
+      </div>
+
+      <Modal open={resetModalOpen} onClose={closeResetModal} title="⚠️ Atenção: reset completo do sistema">
+        <p className="reset-warning">Esta ação irá apagar permanentemente todos os dados cadastrados no sistema e não poderá ser desfeita.</p>
+        <p className="reset-list-title">Serão removidos:</p>
+        <ul className="reset-list">
+          <li>Clientes</li>
+          <li>Vendedoras</li>
+          <li>Produtos e categorias</li>
+          <li>Estoque e movimentações</li>
+          <li>Vendas, comissões e pagamentos a prazo</li>
+          <li>Saídas e acertos de consignação</li>
+          <li>Lançamentos financeiros e fechamentos de caixa</li>
+        </ul>
+        <p className="reset-note">Depois do reset, o sistema ficará limpo para que um novo cadastro de vendedoras, clientes, produtos e estoque seja feito. Os dados da loja (nome, contato) não serão alterados.</p>
+        <Field label="Digite RESETAR para confirmar">
+          <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="RESETAR" autoComplete="off" />
+        </Field>
+        <div className="confirm-actions">
+          <button className="btn-outline" onClick={closeResetModal}>Cancelar</button>
+          <button className="btn-danger-solid" disabled={!canConfirmReset || resetting} onClick={executeReset}>
+            {resetting ? "Resetando sistema..." : "🗑️ CONFIRMAR RESET COMPLETO"}
+          </button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
 /* ============================== GLOBAL STYLE ============================== */
 
 function GlobalStyle() {
@@ -3697,9 +3795,26 @@ function GlobalStyle() {
       .btn-outline:hover { border-color: var(--gold-400); }
       .btn-danger { background: var(--danger-bg); color: var(--danger); }
       .btn-danger:hover { opacity: 0.85; }
+      .btn-danger-solid {
+        display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+        padding: 10px 16px; border-radius: 10px; font-size: 13.5px; font-weight: 700; border: 1px solid transparent; white-space: nowrap;
+        background: var(--danger); color: #fff; box-shadow: 0 2px 6px rgba(179,64,47,0.3);
+        transition: opacity .15s ease, transform .1s ease;
+      }
+      .btn-danger-solid:hover { opacity: 0.9; }
+      .btn-danger-solid:active { transform: scale(0.98); }
+      .btn-danger-solid:disabled { opacity: 0.4; cursor: not-allowed; }
       .btn-block { width: 100%; margin-top: 6px; }
       .btn-lg { padding: 13px 16px; font-size: 14.5px; }
       .btn-sm { padding: 6px 11px; font-size: 12px; }
+
+      .danger-zone { border-color: var(--danger-bg); background: linear-gradient(180deg, #fff, #FDF6F4); }
+      .danger-zone .card-header h3 { color: var(--danger); display: flex; align-items: center; }
+      .danger-zone-text { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin: 0 0 14px; max-width: 640px; }
+      .reset-warning { background: var(--danger-bg); color: var(--danger); padding: 10px 12px; border-radius: 10px; font-size: 13px; font-weight: 600; margin: 0 0 12px; }
+      .reset-list-title { font-size: 12.5px; font-weight: 700; color: var(--ink); margin: 0 0 4px; }
+      .reset-list { margin: 0 0 12px; padding-left: 18px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.7; }
+      .reset-note { font-size: 12px; color: var(--ink-soft); margin: 0 0 14px; }
 
       .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 8px; background: transparent; border: 1px solid transparent; color: var(--ink-soft); }
       .icon-btn:hover { background: var(--cream); color: var(--forest-900); }
