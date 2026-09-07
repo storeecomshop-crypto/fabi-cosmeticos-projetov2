@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { supabase, APP_STATE_ROW_ID } from "./supabaseClient";
 import {
   LayoutDashboard, ShoppingCart, Receipt as ReceiptIcon, Package, Users, UserRound, Percent,
   Search, Plus, Minus, X, Check, Printer, MessageCircle, TrendingUp, TrendingDown,
@@ -439,6 +440,41 @@ function LoadingScreen() {
   );
 }
 
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setLoading(false);
+    if (error) setError("E-mail ou senha incorretos. Confira e tente novamente.");
+  };
+
+  return (
+    <div className="app-root login-page">
+      <GlobalStyle />
+      <form className="login-card" onSubmit={submit}>
+        <img src={LOGO_DATA_URL} alt="Fabi Cosméticos" className="login-logo" />
+        <h1 className="login-title">Entrar no sistema</h1>
+        <p className="login-subtitle">Gestão inteligente para o seu negócio</p>
+        <Field label="E-mail" required>
+          <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        </Field>
+        <Field label="Senha" required>
+          <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        </Field>
+        {error && <p className="login-error">{error}</p>}
+        <button className="btn-gold btn-block btn-lg" type="submit" disabled={loading}>{loading ? "Entrando…" : "Entrar"}</button>
+      </form>
+    </div>
+  );
+}
+
 function Modal({ open, onClose, title, children, wide, noPadding }) {
   if (!open) return null;
   return (
@@ -545,7 +581,9 @@ function withDefaults(data) {
 }
 
 export default function FabiCosmeticosApp() {
-  const [loading, setLoading] = useState(true);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [session, setSession] = useState(null);
+  const [dbLoading, setDbLoading] = useState(true);
   const [db, setDb] = useState(null);
   const [role, setRole] = useState({ type: "admin" });
   const [section, setSection] = useState("dashboard");
@@ -553,6 +591,7 @@ export default function FabiCosmeticosApp() {
   const [toasts, setToasts] = useState([]);
   const [confirm, setConfirm] = useState({ open: false });
   const saveTimer = useRef(null);
+  const lastSyncedRef = useRef(null);
 
   const pushToast = useCallback((message, type = "success") => {
     const id = uid("toast");
@@ -572,46 +611,95 @@ export default function FabiCosmeticosApp() {
     window.storage.set(ROLE_STORAGE_KEY, JSON.stringify(next), false).catch(() => {});
   }, []);
 
-  // ---- load ----
+  // ---- autenticação ----
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage.get(STORAGE_KEY, false);
-        if (res?.value) setDb(withDefaults(JSON.parse(res.value)));
-        else {
-          const seed = buildSeed();
-          setDb(seed);
-          await window.storage.set(STORAGE_KEY, JSON.stringify(seed), false);
-        }
-      } catch (e) {
-        const seed = buildSeed();
-        setDb(seed);
-        try { await window.storage.set(STORAGE_KEY, JSON.stringify(seed), false); } catch (_) {}
-      }
-      try {
-        const roleRes = await window.storage.get(ROLE_STORAGE_KEY, false);
-        if (roleRes?.value) setRole(JSON.parse(roleRes.value));
-      } catch (_) {}
-      setLoading(false);
-    })();
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session || null);
+      setAuthChecked(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession || null);
+      if (!newSession) { setDb(null); lastSyncedRef.current = null; }
+    });
+    return () => sub.subscription.unsubscribe();
   }, []);
 
-  // ---- persist (debounced) ----
+  // ---- carregar dados do banco (Supabase) quando autenticado ----
   useEffect(() => {
-    if (!db) return;
+    if (!session) return;
+    let cancelled = false;
+    setDbLoading(true);
+    (async () => {
+      try {
+        const { data, error } = await supabase.from("app_state").select("data").eq("id", APP_STATE_ROW_ID).maybeSingle();
+        if (cancelled) return;
+        if (error) throw error;
+        if (data?.data) {
+          lastSyncedRef.current = JSON.stringify(data.data);
+          setDb(withDefaults(data.data));
+        } else {
+          const seed = buildSeed();
+          const { error: insertError } = await supabase.from("app_state").insert({ id: APP_STATE_ROW_ID, data: seed });
+          if (insertError) throw insertError;
+          lastSyncedRef.current = JSON.stringify(seed);
+          setDb(seed);
+        }
+      } catch (e) {
+        pushToast("Não foi possível carregar os dados do banco. Verifique sua conexão.", "error");
+      } finally {
+        if (!cancelled) setDbLoading(false);
+      }
+    })();
+    try {
+      window.storage.get(ROLE_STORAGE_KEY, false).then((roleRes) => {
+        if (roleRes?.value) setRole(JSON.parse(roleRes.value));
+      }).catch(() => {});
+    } catch (_) {}
+    return () => { cancelled = true; };
+  }, [session, pushToast]);
+
+  // ---- sincronização em tempo real entre dispositivos/abas ----
+  useEffect(() => {
+    if (!session) return;
+    const channel = supabase
+      .channel("app_state_sync")
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "app_state", filter: `id=eq.${APP_STATE_ROW_ID}` }, (payload) => {
+        const incoming = payload.new?.data;
+        if (!incoming) return;
+        const serialized = JSON.stringify(incoming);
+        if (serialized === lastSyncedRef.current) return;
+        lastSyncedRef.current = serialized;
+        setDb(withDefaults(incoming));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [session]);
+
+  // ---- gravar no banco (debounced) ----
+  useEffect(() => {
+    if (!db || !session) return;
+    const serialized = JSON.stringify(db);
+    if (serialized === lastSyncedRef.current) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      try { await window.storage.set(STORAGE_KEY, JSON.stringify(db), false); }
-      catch (e) { pushToast("Não foi possível salvar os dados agora.", "error"); }
-    }, 350);
+      lastSyncedRef.current = serialized;
+      const { error } = await supabase.from("app_state").update({ data: db, updated_at: new Date().toISOString() }).eq("id", APP_STATE_ROW_ID);
+      if (error) pushToast("Não foi possível salvar os dados agora. Verifique sua conexão.", "error");
+    }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [db, pushToast]);
+  }, [db, session, pushToast]);
 
   const updateDb = useCallback((updater) => {
     setDb((prev) => (typeof updater === "function" ? updater(prev) : { ...prev, ...updater }));
   }, []);
 
-  if (loading || !db) return <LoadingScreen />;
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
+  if (!authChecked) return <LoadingScreen />;
+  if (!session) return <LoginScreen />;
+  if (dbLoading || !db) return <LoadingScreen />;
 
   const isAdmin = role.type === "admin";
   const visibleNavItems = NAV_ITEMS.filter((n) => isAdmin || !n.adminOnly);
@@ -646,6 +734,9 @@ export default function FabiCosmeticosApp() {
           ))}
         </nav>
         <RoleSwitcher db={db} role={role} onChange={changeRole} />
+        <button className="logout-btn" onClick={handleLogout} title="Sair da conta">
+          <LockOpen size={13} /> Sair {session?.user?.email ? `(${session.user.email})` : ""}
+        </button>
         <div className="sidebar-footer">
           <p>Feito com carinho para a</p>
           <p className="sidebar-footer-brand">Fabi Cosméticos ✦</p>
@@ -683,6 +774,7 @@ export default function FabiCosmeticosApp() {
               </button>
             ))}
             <RoleSwitcher db={db} role={role} onChange={(r) => { changeRole(r); setMobileNavOpen(false); }} />
+            <button className="logout-btn" onClick={handleLogout}><LockOpen size={13} /> Sair</button>
           </div>
         </div>
       )}
@@ -3832,6 +3924,17 @@ function GlobalStyle() {
 
       .loading-screen { min-height: 100vh; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: var(--cream, #FBF8F1); font-family: 'Inter', sans-serif; color: #6B6A5E; }
       .loading-logo { width: 96px; height: auto; animation: pulse 1.4s ease-in-out infinite; }
+
+      .login-page { min-height: 100vh; width: 100%; display: flex; align-items: center; justify-content: center; background: var(--cream); padding: 20px; }
+      .login-card { background: #fff; border: 1px solid var(--line); border-radius: 18px; padding: 32px 28px; width: 100%; max-width: 380px; box-shadow: 0 20px 50px rgba(15,25,20,0.12); text-align: center; }
+      .login-logo { width: 120px; height: auto; margin: 0 auto 10px; display: block; }
+      .login-title { font-size: 20px; margin-bottom: 2px; }
+      .login-subtitle { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 20px; }
+      .login-card .field { text-align: left; }
+      .login-error { background: var(--danger-bg); color: var(--danger); font-size: 12.5px; font-weight: 600; padding: 8px 10px; border-radius: 9px; margin: 0 0 12px; }
+
+      .logout-btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 8px; margin-top: 8px; border-radius: 9px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); font-size: 11.5px; }
+      .logout-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
       @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.85; } }
 
       .modal-overlay { position: fixed; inset: 0; background: rgba(15,25,20,0.45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; backdrop-filter: blur(2px); }
