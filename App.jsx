@@ -715,30 +715,45 @@ export default function FabiCosmeticosApp() {
     return () => { supabase.removeChannel(channel); };
   }, [session]);
 
-  // ---- gravar no banco (debounced, à prova de corrida entre salvamentos) ----
+  // ---- gravar no banco (debounced, à prova de corrida entre salvamentos, com nova tentativa automática) ----
   const dbRef = useRef(db);
   dbRef.current = db;
   const savingRef = useRef(false);
   const resaveNeededRef = useRef(false);
+  const retryTimerRef = useRef(null);
+  const [syncStatus, setSyncStatus] = useState("ok"); // "ok" | "saving" | "error"
 
   const persistNow = useCallback(async () => {
     if (savingRef.current) { resaveNeededRef.current = true; return; }
+    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
     savingRef.current = true;
+    let failed = false;
     try {
       let current = dbRef.current;
       let serialized = JSON.stringify(current);
       while (serialized !== lastSyncedRef.current) {
+        setSyncStatus("saving");
         const toSave = current;
         const toSaveSerialized = serialized;
         const { error } = await supabase.from("app_state").update({ data: toSave, updated_at: new Date().toISOString() }).eq("id", APP_STATE_ROW_ID);
-        if (error) { pushToast("Não foi possível salvar os dados agora. Verifique sua conexão.", "error"); break; }
+        if (error) {
+          failed = true;
+          pushToast("Não foi possível salvar os dados agora. Vamos tentar de novo automaticamente.", "error");
+          break;
+        }
         lastSyncedRef.current = toSaveSerialized;
         current = dbRef.current;
         serialized = JSON.stringify(current);
       }
     } finally {
       savingRef.current = false;
-      if (resaveNeededRef.current) { resaveNeededRef.current = false; persistNow(); }
+      if (failed) {
+        setSyncStatus("error");
+        retryTimerRef.current = setTimeout(() => { persistNow(); }, 5000);
+      } else {
+        setSyncStatus("ok");
+        if (resaveNeededRef.current) { resaveNeededRef.current = false; persistNow(); }
+      }
     }
   }, [pushToast]);
 
@@ -749,6 +764,8 @@ export default function FabiCosmeticosApp() {
     saveTimer.current = setTimeout(() => { persistNow(); }, 500);
     return () => clearTimeout(saveTimer.current);
   }, [db, session, persistNow]);
+
+  useEffect(() => () => { if (retryTimerRef.current) clearTimeout(retryTimerRef.current); }, []);
 
   const updateDb = useCallback((updater) => {
     setDb((prev) => (typeof updater === "function" ? updater(prev) : { ...prev, ...updater }));
@@ -795,6 +812,7 @@ export default function FabiCosmeticosApp() {
           ))}
         </nav>
         <RoleSwitcher db={db} role={role} onChange={changeRole} />
+        <SyncStatusBadge status={syncStatus} />
         <button className="logout-btn" onClick={handleLogout} title="Sair da conta">
           <LockOpen size={13} /> Sair {session?.user?.email ? `(${session.user.email})` : ""}
         </button>
@@ -835,6 +853,7 @@ export default function FabiCosmeticosApp() {
               </button>
             ))}
             <RoleSwitcher db={db} role={role} onChange={(r) => { changeRole(r); setMobileNavOpen(false); }} />
+            <SyncStatusBadge status={syncStatus} />
             <button className="logout-btn" onClick={handleLogout}><LockOpen size={13} /> Sair</button>
           </div>
         </div>
@@ -855,6 +874,20 @@ export default function FabiCosmeticosApp() {
         {section === "relatorios" && isAdmin && <Relatorios db={db} />}
         {section === "configuracoes" && isAdmin && <Configuracoes db={db} updateDb={updateDb} pushToast={pushToast} changeRole={changeRole} />}
       </main>
+    </div>
+  );
+}
+
+function SyncStatusBadge({ status }) {
+  const config = {
+    ok: { icon: Check, label: "Sincronizado", cls: "sync-ok" },
+    saving: { icon: Repeat, label: "Salvando…", cls: "sync-saving" },
+    error: { icon: AlertTriangle, label: "Sem conexão — tentando de novo", cls: "sync-error" },
+  }[status] || { icon: Check, label: "Sincronizado", cls: "sync-ok" };
+  const Icon = config.icon;
+  return (
+    <div className={`sync-badge ${config.cls}`}>
+      <Icon size={12} /> <span>{config.label}</span>
     </div>
   );
 }
@@ -1834,6 +1867,7 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
   const [form, setForm] = useState(emptyProduct);
   const [newCategory, setNewCategory] = useState("");
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const onPhotoSelected = async (e) => {
     const file = e.target.files?.[0];
@@ -1867,6 +1901,8 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
   const marginPct = cost > 0 ? (profitUnit / cost) * 100 : 0;
 
   const save = () => {
+    if (saving) return;
+    if (photoUploading) { pushToast("Aguarde a foto terminar de enviar antes de salvar.", "error"); return; }
     if (!form.name.trim() || !form.sku.trim() || !form.category || !form.price) { pushToast("Preencha nome, código, categoria e preço de venda.", "error"); return; }
     let categories = db.categories;
     let category = form.category;
@@ -1875,6 +1911,7 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
       category = newCategory.trim();
       if (!categories.includes(category)) categories = [...categories, category];
     }
+    setSaving(true);
     const payload = { ...form, category, cost, price, stock: Number(form.stock) || 0, minStock: Number(form.minStock) || 0 };
     updateDb((prev) => ({
       ...prev,
@@ -1886,6 +1923,7 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
     pushToast(editingId ? "Produto atualizado." : "Produto cadastrado.");
     setModalOpen(false);
     setNewCategory("");
+    setSaving(false);
   };
 
   const remove = (p) => {
@@ -1999,7 +2037,9 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
             <p>Margem: <strong>{cost > 0 ? `${marginPct.toFixed(1)}%` : "—"}</strong></p>
           </div>
         </div>
-        <button className="btn-gold btn-block" onClick={save}>{editingId ? "Salvar alterações" : "Cadastrar produto"}</button>
+        <button className="btn-gold btn-block" onClick={save} disabled={saving || photoUploading}>
+          {photoUploading ? "Enviando foto…" : saving ? "Salvando…" : editingId ? "Salvar alterações" : "Cadastrar produto"}
+        </button>
       </Modal>
     </div>
   );
@@ -3942,6 +3982,7 @@ function GlobalStyle() {
         transition: transform .1s ease, box-shadow .15s ease, opacity .15s ease;
       }
       .btn-gold { background: linear-gradient(135deg, var(--gold-400), var(--gold-600)); color: #241B04; box-shadow: 0 2px 6px rgba(169,128,31,0.35); }
+      .btn-gold:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
       .btn-gold:hover { opacity: 0.92; }
       .btn-gold:active { transform: scale(0.98); }
       .btn-outline { background: #fff; border-color: var(--line); color: var(--forest-900); }
@@ -3996,6 +4037,13 @@ function GlobalStyle() {
 
       .logout-btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 8px; margin-top: 8px; border-radius: 9px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); font-size: 11.5px; }
       .logout-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+
+      .sync-badge { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 8px; border-radius: 8px; font-size: 10.5px; font-weight: 600; margin-top: 4px; }
+      .sync-ok { color: rgba(255,255,255,0.4); }
+      .sync-saving { color: var(--gold-400); }
+      .sync-saving svg { animation: spin 1s linear infinite; }
+      .sync-error { color: #F0A58C; background: rgba(179,64,47,0.25); }
+      @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: 0.85; } }
 
       .modal-overlay { position: fixed; inset: 0; background: rgba(15,25,20,0.45); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; backdrop-filter: blur(2px); }
