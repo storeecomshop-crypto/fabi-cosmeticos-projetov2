@@ -1913,13 +1913,21 @@ function Produtos({ db, role, updateDb, pushToast, askConfirm }) {
     }
     setSaving(true);
     const payload = { ...form, category, cost, price, stock: Number(form.stock) || 0, minStock: Number(form.minStock) || 0 };
+    const isNew = !editingId;
+    const newId = isNew ? uid("prod") : editingId;
     updateDb((prev) => ({
       ...prev,
       categories,
       products: editingId
         ? prev.products.map((p) => p.id === editingId ? { ...p, ...payload } : p)
-        : [{ ...payload, id: uid("prod") }, ...prev.products],
+        : [{ ...payload, id: newId }, ...prev.products],
     }));
+    if (isNew) {
+      // Garante que o produto recém-criado sempre apareça na lista,
+      // mesmo que houvesse uma busca ou filtro de categoria diferente ativo.
+      setSearch("");
+      setCategoryFilter("");
+    }
     pushToast(editingId ? "Produto atualizado." : "Produto cadastrado.");
     setModalOpen(false);
     setNewCategory("");
