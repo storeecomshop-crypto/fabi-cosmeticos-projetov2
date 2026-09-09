@@ -879,15 +879,13 @@ export default function FabiCosmeticosApp() {
 }
 
 function SyncStatusBadge({ status }) {
-  const config = {
-    ok: { icon: Check, label: "Sincronizado", cls: "sync-ok" },
-    saving: { icon: Repeat, label: "Salvando…", cls: "sync-saving" },
-    error: { icon: AlertTriangle, label: "Sem conexão — tentando de novo", cls: "sync-error" },
-  }[status] || { icon: Check, label: "Sincronizado", cls: "sync-ok" };
-  const Icon = config.icon;
+  // A sincronização automática continua acontecendo sozinha em segundo plano
+  // o tempo todo (a cada alteração, cadastro, venda etc.) — esse indicador só
+  // aparece na tela quando há algo que realmente precisa da sua atenção.
+  if (status !== "error") return null;
   return (
-    <div className={`sync-badge ${config.cls}`}>
-      <Icon size={12} /> <span>{config.label}</span>
+    <div className="sync-badge sync-error">
+      <AlertTriangle size={12} /> <span>Sem conexão — tentando de novo</span>
     </div>
   );
 }
